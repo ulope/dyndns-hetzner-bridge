@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 
 import httpx2
 import pytest
@@ -27,6 +28,25 @@ def test_health(client: TestClient) -> None:
 
 def test_unknown_path_is_404(client: TestClient) -> None:
     assert client.get("/").status_code == 404
+
+
+def test_unknown_path_is_logged(client: TestClient, caplog: pytest.LogCaptureFixture) -> None:
+    # What inadyn sends when its ddns-path is left empty: the hostname as the path.
+    with caplog.at_level(logging.INFO, logger="dyndns_hetzner_bridge"):
+        response = client.get(
+            "/bopp.example.com",
+            params={"password": "do-not-log-me"},
+            headers={"User-Agent": "inadyn/2.13.0"},
+        )
+    assert response.status_code == 404
+    assert response.text == "Not Found"
+    (record,) = caplog.records
+    assert record.levelno == logging.WARNING
+    message = record.getMessage()
+    assert "GET /bopp.example.com from 203.0.113.10" in message
+    assert "inadyn/2.13.0" in message
+    assert "/nic/update" in message
+    assert "do-not-log-me" not in message
 
 
 # --- authentication -------------------------------------------------------------------
@@ -340,9 +360,27 @@ def test_allowed_hostnames(make_client: ClientFactory, fake: FakeHetzner) -> Non
     assert fake.values("example.com", "www", "A") is None
 
 
-def test_post_is_not_allowed(client: TestClient) -> None:
-    response = client.post("/nic/update", params={"hostname": "home.example.com"}, auth=AUTH)
+def test_post_is_not_allowed(client: TestClient, caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.INFO, logger="dyndns_hetzner_bridge"):
+        response = client.post("/nic/update", params={"hostname": "home.example.com"}, auth=AUTH)
     assert response.status_code == 405
+    assert response.headers["Allow"] == "GET, HEAD"
+    assert "Ignored POST /nic/update" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("params", "expected"),
+    [
+        ({"myip": "1.2.3.4"}, "no hostname given"),
+        ({"hostname": ",".join(f"h{i}.example.com" for i in range(21))}, "21 hostnames"),
+    ],
+)
+def test_rejected_requests_are_logged(
+    client: TestClient, caplog: pytest.LogCaptureFixture, params: dict[str, str], expected: str
+) -> None:
+    with caplog.at_level(logging.INFO, logger="dyndns_hetzner_bridge"):
+        client.get("/nic/update", params=params, auth=AUTH)
+    assert expected in caplog.text
 
 
 # --- API failures ---------------------------------------------------------------------
