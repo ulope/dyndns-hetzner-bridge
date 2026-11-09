@@ -12,8 +12,9 @@ from importlib.metadata import PackageNotFoundError, version
 
 import httpx2
 from starlette.applications import Starlette
+from starlette.exceptions import HTTPException
 from starlette.requests import Request
-from starlette.responses import PlainTextResponse
+from starlette.responses import PlainTextResponse, Response
 from starlette.routing import Route
 
 from .config import Settings
@@ -84,8 +85,15 @@ def create_app(
             if hostname.strip()
         ]
         if not hostnames:
+            log.info("Rejected update from %s: no hostname given", _peer(request))
             return _reply(ReturnCode.NOTFQDN)
         if len(hostnames) > MAX_HOSTNAMES:
+            log.info(
+                "Rejected update from %s: %d hostnames, at most %d allowed",
+                _peer(request),
+                len(hostnames),
+                MAX_HOSTNAMES,
+            )
             return _reply(ReturnCode.NUMHOST)
 
         address_params = [
@@ -132,8 +140,32 @@ def create_app(
             Route("/nic/update", update, methods=["GET"]),
             Route("/health", health, methods=["GET"]),
         ],
+        exception_handlers={404: _unhandled_request, 405: _unhandled_request},
         lifespan=lifespan,
     )
+
+
+async def _unhandled_request(request: Request, exc: Exception) -> Response:
+    """Answer requests for unknown paths or methods, and log them.
+
+    The access log is disabled (see ``__main__``), so without this a misconfigured
+    client (e.g. a wrong update path) would leave no trace at all.
+    """
+    assert isinstance(exc, HTTPException)  # noqa: S101
+    log.warning(
+        "Ignored %s %s from %s (User-Agent: %s): %d %s; updates must be sent to GET /nic/update",
+        request.method,
+        _truncate(request.url.path),
+        _peer(request),
+        _truncate(request.headers.get("User-Agent", "-")),
+        exc.status_code,
+        exc.detail,
+    )
+    return PlainTextResponse(exc.detail, status_code=exc.status_code, headers=exc.headers)
+
+
+def _truncate(value: str, limit: int = 200) -> str:
+    return value if len(value) <= limit else f"{value[:limit]}..."
 
 
 def _reply(code: ReturnCode) -> PlainTextResponse:

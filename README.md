@@ -138,6 +138,52 @@ The FRITZ!Box leaves `<ip6addr>` empty when it has no IPv6 address. Empty parame
 ignored, so the same URL works with and without IPv6. If your router can't send basic
 auth, append `&username=<username>&password=<pass>` to the URL.
 
+### UniFi gateways (UCG, UDM, UXG, …)
+
+In the WAN settings under *Dynamic DNS*, create an entry:
+
+* Service: `custom` (or `dyndns`)
+* Hostname: `home.example.com`
+* Username / Password: your `DYNDNS_USERNAME` / `DYNDNS_PASSWORD`
+* Server: `dyndns.example.com/nic/update?hostname=%h&myip=%i`
+
+The **Server** field must include the path. UniFi gateways use inadyn, and the part
+after the host name becomes inadyn's update path. With only a host name in that field,
+inadyn requests `GET home.example.com`, which is not a valid HTTP request. A reverse
+proxy answers it with `400 Bad Request`, and the bridge never sees it.
+
+UniFi sends one address per update, and it picks the IPv6 address whenever the WAN
+interface has one. In that case only the `AAAA` record is kept up to date. See
+[inadyn](#inadyn) below for how to update the `A` record as well.
+
+### inadyn
+
+```text
+custom bridge {
+    hostname    = home.example.com
+    username    = router
+    password    = a-long-random-password
+    ddns-server = dyndns.example.com
+    ddns-path   = "/nic/update?hostname=%h&myip=%i"
+}
+```
+
+`ddns-path` is required. Without it inadyn sends the bare hostname as the request path
+(see above).
+
+inadyn sends a single address per update. If it can see an IPv6 address (with
+`allow-ipv6 = true`), it uses that one. To keep both records current, add a second
+section for the same hostname whose `checkip-command` prints only the IPv4 address,
+or update the `A` record from another machine:
+
+```bash
+curl -fsS -u router:a-long-random-password \
+  "https://dyndns.example.com/nic/update?hostname=home.example.com&myip=$(curl -4 -fsS https://ifconfig.me/ip)"
+```
+
+The bridge only touches the record types it receives an address for. Separate IPv4 and
+IPv6 updates therefore don't interfere with each other.
+
 ### ddclient
 
 ```ini
@@ -216,6 +262,21 @@ the real client address. Set `FORWARDED_ALLOW_IPS` to the address of your proxy 
 `X-Forwarded-For` header is trusted. Inside Docker networks that is usually the proxy
 container's address; `*` trusts every peer and is only safe if the bridge can't be
 reached except through the proxy.
+
+## Troubleshooting
+
+Every request that reaches the bridge leaves at least one log line, except `/health`.
+Update requests log each hostname and the result. A request for another path or method
+logs a warning with the path (without the query string) and the client's `User-Agent`.
+
+* **The client reports an error but the bridge logs nothing.** The request never reached
+  the bridge. A `400 Bad Request` that the bridge didn't log usually comes from the
+  reverse proxy rejecting a malformed request line, typically a client that sends no
+  update path (see [inadyn](#inadyn)). Check the proxy's logs and the client's debug
+  output for the exact `GET` line.
+* **`Ignored GET /something`** in the log: the client uses the wrong path. Updates must
+  go to `/nic/update`.
+* **Set `LOG_LEVEL=DEBUG`** to see every request the bridge makes to the Hetzner API.
 
 ## Security notes
 
